@@ -18,7 +18,13 @@ from typing import List, Optional
 import numpy as np
 import streamlit as st
 
-from config import AUDIO, CONFIDENCE, get_access_key, get_elevenlabs_api_key
+from config import (
+    AUDIO,
+    CONFIDENCE,
+    get_access_key,
+    get_elevenlabs_api_key,
+    get_vosk_model_path,
+)
 from recorder import (
     RecorderError,
     list_input_devices,
@@ -33,6 +39,8 @@ from transcriber import (
     resolve_engine,
 )
 from vad import CobraVAD, VADError
+from energy_vad import EnergyGateVAD
+from vosk_hints import vosk_offline_hints
 from diagnostics import (
     analyze_audio,
     append_failure,
@@ -49,6 +57,7 @@ from benchmarks import (
 )
 from visuals import (
     audio_to_wav_bytes,
+    build_energy_vad_chart,
     build_waveform_chart,
     homophone_tag,
     transcript_stability,
@@ -411,18 +420,27 @@ with st.sidebar:
     st.session_state.has_eleven_flag = has_eleven
 
     use_vad = st.toggle(
-        "Use Cobra VAD (filter silence)",
+        "VAD: filter silence",
         value=False,
-        help="Drops silent frames before STT - architecturally correct pipeline.",
+        help=(
+            "With a Picovoice AccessKey: **Cobra** (neural). "
+            "Without a key: **RMS energy gate** — CREATE-TKS-style on-device "
+            "backup. Optional: set ``VOSK_MODEL_PATH`` and ``pip install vosk`` "
+            "for offline **Partial:** hints echoing CREATE-TKS voice feedback."
+        ),
     )
 
     vad_threshold = st.slider(
-        "VAD voice probability threshold",
+        "VAD sensitivity",
         min_value=0.10,
         max_value=0.90,
         value=0.50,
         step=0.05,
         disabled=not use_vad,
+        help=(
+            "Cobra: minimum voice probability per frame. "
+            "Energy gate: higher = stricter (needs louder speech vs noise floor)."
+        ),
     )
 
     with st.expander("Audio devices", expanded=False):
@@ -550,24 +568,34 @@ def run_pipeline(audio: np.ndarray, source: str) -> None:
     t0 = time.perf_counter()
 
     if use_vad:
-        if not access_key:
-            st.warning(
-                "Cobra VAD needs a Picovoice AccessKey — skipping VAD for this run."
-            )
-            vad = None
-        else:
+        if access_key:
             try:
                 vad = CobraVAD(access_key=access_key, threshold=vad_threshold)
             except VADError as exc:
                 st.error(f"VAD init failed: {exc}")
                 return
+        else:
+            vad = EnergyGateVAD(threshold=vad_threshold)
     else:
         vad = None
 
     if vad is not None:
         try:
-            audio, voiced_ratio = vad.filter_voiced(audio)
-            meta["voiced_ratio"] = voiced_ratio
+            if isinstance(vad, CobraVAD):
+                audio, voiced_ratio = vad.filter_voiced(audio)
+                meta["vad_backend"] = "cobra"
+                meta["voiced_ratio"] = voiced_ratio
+            else:
+                audio, voiced_ratio, ev_report = vad.filter_voiced(audio)
+                meta["vad_backend"] = "energy_rms"
+                meta["voiced_ratio"] = voiced_ratio
+                meta["energy_vad"] = {
+                    "noise_floor_dbfs": ev_report.noise_floor_dbfs,
+                    "threshold_dbfs": ev_report.threshold_dbfs,
+                    "frame_centers_sec": ev_report.frame_centers_sec.tolist(),
+                    "frame_dbfs": ev_report.frame_dbfs.tolist(),
+                    "voiced_mask": ev_report.voiced_mask.tolist(),
+                }
         except VADError as exc:
             st.error(f"VAD processing failed: {exc}")
             vad.delete()
@@ -577,10 +605,22 @@ def run_pipeline(audio: np.ndarray, source: str) -> None:
 
         if audio.size == 0:
             st.warning(
-                "Cobra VAD filtered out every frame - no voice detected. "
+                "VAD filtered out every frame - no voice detected. "
                 "Try lowering the VAD threshold or re-recording."
             )
             return
+
+    # Optional offline Vosk partials (CREATE-TKS-style) on the gated audio.
+    if use_vad and audio.size > 0:
+        vdir = get_vosk_model_path()
+        if vdir is not None:
+            vh = vosk_offline_hints(audio, vdir)
+            meta["vosk_hints"] = {
+                "text": vh.text,
+                "partial_last": vh.partial_last,
+                "available": vh.available,
+                "detail": vh.detail,
+            }
 
     try:
         transcriber = make_transcriber(engine, access_key, eleven_api_key)
@@ -706,6 +746,68 @@ with tab_debug:
         mcol3.metric("Words", len(result.words))
         mcol4.metric("Elapsed", f"{meta.get('elapsed_sec', 0.0):.2f}s")
 
+        # CREATE-TKS-style voice feedback when VAD (or Vosk hints) ran.
+        vb = meta.get("vad_backend")
+        vhints = meta.get("vosk_hints") or {}
+        ev = meta.get("energy_vad") or {}
+        if vb or vhints:
+            st.markdown("##### Voice activity")
+            back = {
+                "cobra": "Picovoice Cobra (neural VAD)",
+                "energy_rms": "RMS energy gate — on-device backup when no Picovoice key (CREATE-TKS pattern)",
+            }.get(vb or "", "—")
+            heard_main = (result.transcript or "").strip() or "—"
+            vosk_txt = (vhints.get("text") or "").strip()
+            if vhints.get("partial_last"):
+                partial = vhints["partial_last"]
+            elif ev:
+                partial = (
+                    f"RMS · noise floor {ev['noise_floor_dbfs']:.1f} dBFS · "
+                    f"gate {ev['threshold_dbfs']:.1f} dBFS · "
+                    f"{meta.get('voiced_ratio', 0.0) * 100:.0f}% frames voiced"
+                )
+            elif vb == "cobra":
+                partial = (
+                    f"Cobra · {meta.get('voiced_ratio', 0.0) * 100:.0f}% frames over "
+                    "your probability cutoff."
+                )
+            else:
+                partial = "—"
+
+            c_heard, c_part, c_back = st.columns(3)
+            with c_heard:
+                st.markdown("**Heard** (STT)")
+                st.caption(heard_main[:480] + ("…" if len(heard_main) > 480 else ""))
+                if vosk_txt and vosk_txt.lower() != heard_main.lower():
+                    st.caption(f"Vosk hint: _{vosk_txt[:200]}{'…' if len(vosk_txt) > 200 else ''}_")
+            with c_part:
+                st.markdown("**Partial**")
+                st.caption(partial[:360] + ("…" if len(partial) > 360 else ""))
+            with c_back:
+                st.markdown("**Backend · intent**")
+                st.caption(back)
+                st.caption(f"Engine `{result.engine}` on VAD-trimmed audio")
+
+            if vhints and not vhints.get("partial_last") and vhints.get("detail"):
+                if vhints.get("detail") not in ("ok", ""):
+                    st.caption(
+                        f"Vosk: {vhints['detail']} — optional: `pip install vosk` + "
+                        "`VOSK_MODEL_PATH` for CREATE-TKS-style partials."
+                    )
+
+            if ev.get("frame_centers_sec"):
+                with st.expander("RMS gate — frame level chart", expanded=False):
+                    try:
+                        ch = build_energy_vad_chart(
+                            ev["frame_centers_sec"],
+                            ev["frame_dbfs"],
+                            ev["voiced_mask"],
+                            ev["threshold_dbfs"],
+                        )
+                        st.altair_chart(ch, width="stretch")
+                    except Exception as exc:
+                        st.caption(f"(chart error: {exc})")
+
         if avg_conf < threshold:
             st.error(
                 f"⚠️ Average confidence {format_confidence(avg_conf)} is below "
@@ -737,9 +839,14 @@ with tab_debug:
                 "switch to Leopard for the full debugger view."
             )
 
-        if "voiced_ratio" in meta:
+        if "voiced_ratio" in meta and meta.get("vad_backend"):
+            _vlabel = (
+                "Cobra VAD"
+                if meta["vad_backend"] == "cobra"
+                else "RMS energy gate"
+            )
             st.caption(
-                f"Cobra VAD kept {meta['voiced_ratio'] * 100:.1f}% of frames as voiced."
+                f"{_vlabel} kept {meta['voiced_ratio'] * 100:.1f}% of frames as voiced."
             )
 
         # --- Waveform with confidence heatmap ----------------------------

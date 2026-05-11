@@ -74,3 +74,14 @@ def get_elevenlabs_api_key() -> str | None:
     if not key or key == "your-elevenlabs-api-key-here":
         return None
     return key
+
+
+def get_vosk_model_path() -> Path | None:
+    """Directory containing a Vosk model (see https://alphacephei.com/vosk/models)."""
+    raw = os.environ.get("VOSK_MODEL_PATH")
+    if not raw:
+        return None
+    p = Path(raw.strip()).expanduser()
+    if not p.is_dir():
+        return None
+    return p

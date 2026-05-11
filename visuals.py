@@ -140,6 +140,66 @@ def build_waveform_chart(
     return chart.configure_view(stroke=None)
 
 
+def build_energy_vad_chart(
+    frame_centers_sec: Sequence[float],
+    frame_dbfs: Sequence[float],
+    voiced_mask: Sequence[bool],
+    threshold_dbfs: float,
+):
+    """Per-frame loudness vs the adaptive gate (CREATE-TKS-style trust curve)."""
+    import altair as alt
+    import pandas as pd
+
+    rows = []
+    for t, db, v in zip(frame_centers_sec, frame_dbfs, voiced_mask):
+        rows.append(
+            {
+                "t": float(t),
+                "dBFS": float(db),
+                "frame": "voiced" if v else "silent",
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return (
+            alt.Chart(pd.DataFrame({"lab": ["Not enough audio for an RMS gate chart."]}))
+            .mark_text(dy=10)
+            .encode(text="lab:N")
+            .properties(height=120)
+            .configure_view(stroke=None)
+        )
+
+    points = (
+        alt.Chart(df)
+        .mark_circle(size=55)
+        .encode(
+            x=alt.X("t:Q", title="time (s)"),
+            y=alt.Y("dBFS:Q", title="frame RMS (dBFS)"),
+            color=alt.Color(
+                "frame:N",
+                scale=alt.Scale(domain=["voiced", "silent"], range=["#10b981", "#64748b"]),
+                legend=alt.Legend(title="gate"),
+            ),
+            tooltip=[
+                alt.Tooltip("t:Q", format=".3f", title="t (s)"),
+                alt.Tooltip("dBFS:Q", format=".1f"),
+                alt.Tooltip("frame:N"),
+            ],
+        )
+    )
+    rule_df = pd.DataFrame({"thr": [float(threshold_dbfs)]})
+    rule = (
+        alt.Chart(rule_df)
+        .mark_rule(color="#f97316", strokeWidth=2)
+        .encode(y="thr:Q")
+    )
+    return (
+        (points + rule)
+        .properties(height=220, title="Energy gate — frame level vs threshold")
+        .configure_view(stroke=None)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-word audio slicing for st.audio
 # ---------------------------------------------------------------------------

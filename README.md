@@ -48,7 +48,10 @@ was easy to build.
   that Picovoice regularly confuses regardless of confidence.
 - Avg / min confidence metrics, tunable **warning threshold** slider,
   per-word bar chart, raw word table (with homophone column).
-- Optional **Cobra VAD** filter drops silent frames before STT.
+- Optional **VAD** drops silent frames before STT — **Picovoice Cobra**
+  with a key, or an **RMS energy gate** (CREATE-TKS-style on-device backup)
+  without. Set `VOSK_MODEL_PATH` + `pip install vosk` for optional offline
+  **Partial:** hints echoing CREATE-TKS voice feedback.
 
 ### 🔊 Audio Quality Pre-Flight
 
@@ -154,9 +157,10 @@ sized investment — demoted to its real value.
 ## Architecture
 
 ```
-Mic input  →  Cobra VAD (optional)  →  Leopard / Cheetah STT
-           →  Parse transcript + per-word confidence
-           →  Streamlit UI (color-coded transcript, metrics, chart)
+Mic input  →  VAD (optional): Cobra if AccessKey, else RMS energy gate
+           →  Optional offline Vosk partial hints (if VOSK_MODEL_PATH)
+           →  STT (Picovoice / ElevenLabs / mock)
+           →  Streamlit UI (CREATE-TKS-style Heard / Partial panel when VAD on)
 ```
 
 ## File structure
@@ -166,7 +170,9 @@ voice-debugger/
 ├── app.py              # Streamlit UI — 5 tabs, main entry point
 ├── recorder.py         # sounddevice mic capture + WAV loader
 ├── transcriber.py      # Leopard / Cheetah / Mock wrappers
-├── vad.py              # Cobra VAD integration (optional)
+├── vad.py              # Cobra VAD (Picovoice AccessKey)
+├── energy_vad.py       # RMS energy gate — VAD backup without Picovoice key
+├── vosk_hints.py       # Optional offline Vosk partials (CREATE-TKS-style)
 ├── diagnostics.py      # Audio stats, noise injection, WER, failure library
 ├── benchmarks.py       # Latency percentiles, RTF, footprint probe
 ├── visuals.py          # Waveform chart, WAV slicing, homophones, stability
