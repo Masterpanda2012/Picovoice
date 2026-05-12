@@ -53,6 +53,36 @@ AUDIO = AudioConfig()
 CONFIDENCE = ConfidenceConfig()
 
 
+def _is_picovoice_placeholder(key: str) -> bool:
+    k = (key or "").strip().lower()
+    return not k or k == "your-picovoice-access-key-here" or k.startswith("your-picovoice")
+
+
+def _is_elevenlabs_placeholder(key: str) -> bool:
+    k = (key or "").strip().lower()
+    return not k or k == "your-elevenlabs-api-key-here" or k.startswith("your-elevenlabs")
+
+
+def normalize_session_picovoice_key(raw: str | None) -> str | None:
+    """Validate a user-pasted Picovoice key (session UI). None if empty/placeholder."""
+    if raw is None:
+        return None
+    s = raw.strip()
+    if _is_picovoice_placeholder(s):
+        return None
+    return s
+
+
+def normalize_session_elevenlabs_key(raw: str | None) -> str | None:
+    """Validate a user-pasted ElevenLabs key (session UI). None if empty/placeholder."""
+    if raw is None:
+        return None
+    s = raw.strip()
+    if _is_elevenlabs_placeholder(s):
+        return None
+    return s
+
+
 def get_access_key() -> str | None:
     """Return the Picovoice AccessKey from env, or None if not configured.
 
@@ -63,12 +93,7 @@ def get_access_key() -> str | None:
     if not key:
         return None
     key = key.strip()
-    if not key:
-        return None
-    lowered = key.lower()
-    if lowered == "your-picovoice-access-key-here":
-        return None
-    if lowered.startswith("your-picovoice"):
+    if _is_picovoice_placeholder(key):
         return None
     return key
 
@@ -83,7 +108,7 @@ def get_elevenlabs_api_key() -> str | None:
     if not key:
         return None
     key = key.strip()
-    if not key or key == "your-elevenlabs-api-key-here":
+    if _is_elevenlabs_placeholder(key):
         return None
     return key
 

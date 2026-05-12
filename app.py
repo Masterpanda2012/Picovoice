@@ -24,6 +24,8 @@ from config import (
     get_access_key,
     get_elevenlabs_api_key,
     get_vosk_model_path,
+    normalize_session_elevenlabs_key,
+    normalize_session_picovoice_key,
 )
 from recorder import (
     RecorderError,
@@ -146,6 +148,36 @@ if "bench_results" not in st.session_state:
     st.session_state.bench_results = {}
 if "replay_rows" not in st.session_state:
     st.session_state.replay_rows = None
+if "user_pico_key" not in st.session_state:
+    st.session_state.user_pico_key = ""
+if "user_eleven_key" not in st.session_state:
+    st.session_state.user_eleven_key = ""
+
+
+def resolved_picovoice_key() -> str:
+    """Session-pasted Picovoice key wins over ``PICOVOICE_ACCESS_KEY`` from env."""
+    u = normalize_session_picovoice_key(st.session_state.get("user_pico_key"))
+    if u:
+        return u
+    return get_access_key() or ""
+
+
+def resolved_elevenlabs_key() -> str:
+    """Session-pasted ElevenLabs key wins over env."""
+    u = normalize_session_elevenlabs_key(st.session_state.get("user_eleven_key"))
+    if u:
+        return u
+    return get_elevenlabs_api_key() or ""
+
+
+if not (resolved_picovoice_key() or resolved_elevenlabs_key()):
+    st.info(
+        "**First time here?** Open the **sidebar → API keys** section, paste your "
+        "**Picovoice AccessKey** and/or **ElevenLabs API key**, then click "
+        "**Save for this session**. Keys stay in this browser tab only (not saved "
+        "to disk unless you add a `.env` file). "
+        "Free Picovoice key: [console.picovoice.ai](https://console.picovoice.ai)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -329,52 +361,107 @@ def build_session_report() -> str:
 with st.sidebar:
     st.header("Settings")
 
+    toast = st.session_state.pop("_api_key_toast", None)
+    if toast:
+        st.success(toast)
+
+    st.subheader("API keys")
+    st.caption(
+        "Paste keys and click **Save for this session** — no `.env` file required. "
+        "Values stay in this browser tab only (RAM). Session keys **override** "
+        "the same variable from `.env` when both are set."
+    )
+    with st.form("session_api_keys"):
+        pico_in = st.text_input(
+            "Picovoice AccessKey",
+            type="password",
+            placeholder="From console.picovoice.ai …",
+            help="Leave blank when saving to keep the previous session Picovoice key unchanged.",
+        )
+        eleven_in = st.text_input(
+            "ElevenLabs API key",
+            type="password",
+            placeholder="Optional — Scribe cloud STT …",
+            help="Leave blank when saving to keep the previous session ElevenLabs key unchanged.",
+        )
+        c_save, c_clear = st.columns(2)
+        with c_save:
+            save_keys = st.form_submit_button("Save for this session", type="primary")
+        with c_clear:
+            clear_keys = st.form_submit_button("Clear session keys")
+
+    if save_keys:
+        parts: list[str] = []
+        if pico_in.strip():
+            np_k = normalize_session_picovoice_key(pico_in)
+            if np_k:
+                st.session_state.user_pico_key = np_k
+                parts.append("Picovoice saved")
+            else:
+                parts.append("Picovoice: ignored (placeholder?)")
+        if eleven_in.strip():
+            ne_k = normalize_session_elevenlabs_key(eleven_in)
+            if ne_k:
+                st.session_state.user_eleven_key = ne_k
+                parts.append("ElevenLabs saved")
+            else:
+                parts.append("ElevenLabs: ignored (placeholder?)")
+        st.session_state._api_key_toast = (
+            " · ".join(parts)
+            if parts
+            else "Nothing to save — type a key first, or click Clear."
+        )
+        st.rerun()
+
+    if clear_keys:
+        st.session_state.user_pico_key = ""
+        st.session_state.user_eleven_key = ""
+        st.session_state._api_key_toast = "Session keys cleared."
+        st.rerun()
+
     access_key_env = get_access_key()
     eleven_key_env = get_elevenlabs_api_key()
+    access_key = resolved_picovoice_key().strip()
+    eleven_api_key = resolved_elevenlabs_key().strip()
+
+    sp_sess = bool(normalize_session_picovoice_key(st.session_state.get("user_pico_key")))
+    se_sess = bool(normalize_session_elevenlabs_key(st.session_state.get("user_eleven_key")))
+
+    st.caption(
+        f"**Active** · Picovoice: {'yes' if access_key else 'no'} · "
+        f"ElevenLabs: {'yes' if eleven_api_key else 'no'}  \n"
+        f"**Source** · Picovoice: "
+        f"{'session' if sp_sess else ('.env' if access_key_env else '—')} · "
+        f"ElevenLabs: "
+        f"{'session' if se_sess else ('.env' if eleven_key_env else '—')}"
+    )
 
     has_pico_env = bool(access_key_env)
     has_eleven_env = bool(eleven_key_env)
+    has_key = bool(access_key)
+    has_eleven = bool(eleven_api_key)
 
-    if has_pico_env and has_eleven_env:
+    if has_key and has_eleven:
         st.success(
-            "✅ Picovoice AccessKey **and** ElevenLabs API key loaded.\n\n"
+            "✅ Picovoice **and** ElevenLabs are ready.\n\n"
             "Priority: **Picovoice → ElevenLabs → Mock**."
         )
-    elif has_pico_env:
-        st.success("✅ Picovoice AccessKey loaded from environment / .env")
-    elif has_eleven_env:
+    elif has_key:
+        st.success(
+            "✅ Picovoice AccessKey ready "
+            f"({'session' if sp_sess else 'from .env'})."
+        )
+    elif has_eleven:
         st.info(
-            "🟣 No Picovoice AccessKey — falling back to **ElevenLabs Scribe** "
-            "(cloud STT) for transcription.\n\n"
-            "Add `PICOVOICE_ACCESS_KEY` to `.env` to switch to on-device "
-            "Picovoice engines."
+            "🟣 No Picovoice key — using **ElevenLabs Scribe** "
+            f"({'session' if se_sess else 'from .env'}). "
+            "Add Picovoice above for on-device engines."
         )
     else:
         st.info(
-            "🎭 No API keys detected — running in **mock mode**.\n\n"
-            "Priority order is **Picovoice → ElevenLabs → Mock**. "
-            "Drop a key into a `.env` file next to `app.py`:\n\n"
-            "`PICOVOICE_ACCESS_KEY=your-picovoice-key`  \n"
-            "`ELEVENLABS_API_KEY=your-elevenlabs-key`"
+            "🎭 **Mock mode** — add a Picovoice and/or ElevenLabs key in **API keys** "
+            "above (or in `.env`). Priority: **Picovoice → ElevenLabs → Mock**."
         )
-
-    with st.expander("Override keys for this session", expanded=False):
-        override_key = st.text_input(
-            "Picovoice AccessKey",
-            value="",
-            type="password",
-            help="Optional — overrides PICOVOICE_ACCESS_KEY for this session only.",
-        )
-        override_eleven = st.text_input(
-            "ElevenLabs API key",
-            value="",
-            type="password",
-            help="Optional — overrides ELEVENLABS_API_KEY for this session only.",
-        )
-    access_key = (override_key or access_key_env or "").strip()
-    eleven_api_key = (override_eleven or eleven_key_env or "").strip()
-    has_key = bool(access_key)
-    has_eleven = bool(eleven_api_key)
 
     # Build engine options in priority order: Picovoice -> ElevenLabs -> Mock.
     engine_options: list[str] = []

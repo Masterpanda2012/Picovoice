@@ -231,6 +231,14 @@ sudo apt-get install -y libportaudio2
 
 ### 3. Configure your keys
 
+You can either:
+
+1. **Paste in the app (easiest)** — open the sidebar **API keys** section, enter
+   your Picovoice and/or ElevenLabs key, click **Save for this session**. Keys
+   stay in the browser tab only (RAM); nothing is written to disk.
+
+2. **Use a `.env` file** (persists across restarts):
+
 ```bash
 cp .env.example .env
 # then edit .env and paste whichever keys you have
