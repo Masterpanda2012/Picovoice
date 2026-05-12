@@ -14,6 +14,19 @@ from pathlib import Path
 from typing import Any
 
 
+def vosk_runtime_available() -> bool:
+    """True when ``VOSK_MODEL_PATH`` points at a directory and ``vosk`` imports."""
+    from config import get_vosk_model_path
+
+    if get_vosk_model_path() is None:
+        return False
+    try:
+        import vosk  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 @dataclass
 class VoskHintResult:
     text: str

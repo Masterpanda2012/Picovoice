@@ -38,11 +38,10 @@ from transcriber import (
     TranscriptionResult,
     Word,
     make_transcriber,
-    resolve_engine,
 )
 from vad import CobraVAD, VADError
 from energy_vad import EnergyGateVAD
-from vosk_hints import vosk_offline_hints
+from vosk_hints import vosk_offline_hints, vosk_runtime_available
 from diagnostics import (
     analyze_audio,
     append_failure,
@@ -152,6 +151,10 @@ if "user_pico_key" not in st.session_state:
     st.session_state.user_pico_key = ""
 if "user_eleven_key" not in st.session_state:
     st.session_state.user_eleven_key = ""
+if "debugger_engine" not in st.session_state:
+    st.session_state.debugger_engine = "mock"
+if "_engine_sig" not in st.session_state:
+    st.session_state._engine_sig = None
 
 
 def resolved_picovoice_key() -> str:
@@ -170,14 +173,24 @@ def resolved_elevenlabs_key() -> str:
     return get_elevenlabs_api_key() or ""
 
 
-if not (resolved_picovoice_key() or resolved_elevenlabs_key()):
-    st.info(
-        "**First time here?** Open the **sidebar → API keys** section, paste your "
-        "**Picovoice AccessKey** and/or **ElevenLabs API key**, then click "
-        "**Save for this session**. Keys stay in this browser tab only (not saved "
-        "to disk unless you add a `.env` file). "
-        "Free Picovoice key: [console.picovoice.ai](https://console.picovoice.ai)."
-    )
+_rp = resolved_picovoice_key()
+_re = resolved_elevenlabs_key()
+if not _rp and not _re:
+    if vosk_runtime_available():
+        st.info(
+            "**No Picovoice or ElevenLabs key** — default STT is **Vosk** (offline, "
+            "on-device). Add keys under **sidebar → API keys** anytime; the "
+            "engine switches to Picovoice or ElevenLabs as soon as they are saved. "
+            "Models: [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)."
+        )
+    else:
+        st.info(
+            "**First time here?** With no cloud keys, install **`pip install vosk`**, "
+            "set **`VOSK_MODEL_PATH`** to an unzipped model folder, then restart — "
+            "the app will default to **Vosk** offline STT. Or open **sidebar → API keys** "
+            "and paste **Picovoice** / **ElevenLabs** keys. "
+            "Free Picovoice key: [console.picovoice.ai](https://console.picovoice.ai)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -233,10 +246,13 @@ def build_session_report() -> str:
     lines.append(f"- Warning threshold: {st.session_state.get('threshold_value', 0.75):.2f}")
     has_key_now = bool(st.session_state.get('has_key_flag'))
     has_eleven_now = bool(st.session_state.get('has_eleven_flag'))
+    has_vosk_now = bool(st.session_state.get('has_vosk_flag'))
     if has_key_now:
         key_state = "Picovoice (on-device)"
     elif has_eleven_now:
         key_state = "ElevenLabs Scribe (cloud fallback)"
+    elif has_vosk_now:
+        key_state = "Vosk (offline STT)"
     else:
         key_state = "none — mock mode"
     lines.append(f"- Active engine family: {key_state}")
@@ -444,7 +460,7 @@ with st.sidebar:
     if has_key and has_eleven:
         st.success(
             "✅ Picovoice **and** ElevenLabs are ready.\n\n"
-            "Priority: **Picovoice → ElevenLabs → Mock**."
+            "Priority: **Picovoice → ElevenLabs → Vosk → Mock**."
         )
     elif has_key:
         st.success(
@@ -453,37 +469,64 @@ with st.sidebar:
         )
     elif has_eleven:
         st.info(
-            "🟣 No Picovoice key — using **ElevenLabs Scribe** "
+            "🟣 No Picovoice key — **ElevenLabs Scribe** available "
             f"({'session' if se_sess else 'from .env'}). "
             "Add Picovoice above for on-device engines."
         )
+    elif has_vosk:
+        st.info(
+            "🎤 **Vosk offline STT** — no Picovoice/ElevenLabs keys, but your "
+            "`VOSK_MODEL_PATH` and `vosk` install are valid. Default engine is **vosk**; "
+            "save API keys above to switch to Picovoice or ElevenLabs automatically."
+        )
     else:
         st.info(
-            "🎭 **Mock mode** — add a Picovoice and/or ElevenLabs key in **API keys** "
-            "above (or in `.env`). Priority: **Picovoice → ElevenLabs → Mock**."
+            "🎭 **Mock mode** — add API keys above, or install **vosk** + set "
+            "`VOSK_MODEL_PATH` for offline speech. "
+            "Priority: **Picovoice → ElevenLabs → Vosk → Mock**."
         )
 
-    # Build engine options in priority order: Picovoice -> ElevenLabs -> Mock.
+    has_vosk = vosk_runtime_available()
+
+    # Build engine options in priority order: Picovoice -> ElevenLabs -> Vosk -> Mock.
     engine_options: list[str] = []
     if has_key:
         engine_options.extend(["leopard", "cheetah"])
     if has_eleven:
         engine_options.append("elevenlabs")
+    if has_vosk:
+        engine_options.append("vosk")
     engine_options.append("mock")
 
-    # Default = the first available in priority order.
-    default_engine_index = 0
+    # When API credentials change, auto-select the highest-priority engine so
+    # adding a key immediately switches off Vosk without a manual radio click.
+    sig = (bool(has_key), bool(has_eleven), bool(has_vosk))
+    if st.session_state.get("_engine_sig") != sig:
+        st.session_state._engine_sig = sig
+        if has_key:
+            st.session_state.debugger_engine = "leopard"
+        elif has_eleven:
+            st.session_state.debugger_engine = "elevenlabs"
+        elif has_vosk:
+            st.session_state.debugger_engine = "vosk"
+        else:
+            st.session_state.debugger_engine = "mock"
+
+    if st.session_state.debugger_engine not in engine_options:
+        st.session_state.debugger_engine = engine_options[0]
 
     engine = st.radio(
         "Engine",
         options=engine_options,
-        index=default_engine_index,
+        index=engine_options.index(st.session_state.debugger_engine),
         horizontal=True,
+        key="debugger_engine",
         help=(
             "leopard = Picovoice batch STT with real word-level confidence. "
             "cheetah = Picovoice streaming STT (on-device). "
-            "elevenlabs = ElevenLabs Scribe (cloud, fallback when no Picovoice key). "
-            "mock = offline demo (simulated transcript, audio-driven confidence)."
+            "elevenlabs = ElevenLabs Scribe (cloud). "
+            "vosk = offline Kaldi (default when no API keys if model path + vosk installed). "
+            "mock = simulated transcript."
         ),
     )
 
@@ -505,6 +548,7 @@ with st.sidebar:
     st.session_state.threshold_value = threshold
     st.session_state.has_key_flag = has_key
     st.session_state.has_eleven_flag = has_eleven
+    st.session_state.has_vosk_flag = has_vosk
 
     use_vad = st.toggle(
         "VAD: filter silence",
@@ -587,6 +631,8 @@ def _engine_has_credentials(eng: str) -> bool:
         return bool(access_key)
     if eng == "elevenlabs":
         return bool(eleven_api_key)
+    if eng == "vosk":
+        return bool(vosk_runtime_available())
     return False
 
 
@@ -608,18 +654,24 @@ with col_upload:
 
 if engine == "mock":
     st.caption(
-        "Mock mode active — simulated transcript, real audio-driven confidence. "
-        "Set `PICOVOICE_ACCESS_KEY` or `ELEVENLABS_API_KEY` in `.env` to use a "
-        "real STT engine (priority: Picovoice → ElevenLabs → Mock)."
+        "Mock mode — simulated transcript with audio-driven confidence. "
+        "Add API keys in the sidebar, or install **vosk** + `VOSK_MODEL_PATH` for "
+        "offline speech (priority: Picovoice → ElevenLabs → Vosk → Mock)."
     )
 elif engine == "elevenlabs":
     st.caption(
         "Using **ElevenLabs Scribe** (cloud STT) — audio is uploaded to "
-        "ElevenLabs. Add `PICOVOICE_ACCESS_KEY` to `.env` to switch to "
-        "on-device Picovoice."
+        "ElevenLabs. Add a Picovoice AccessKey in the sidebar for on-device engines."
     )
-else:
+elif engine == "vosk":
+    st.caption(
+        "Using **Vosk** (offline Kaldi) — runs locally with no Picovoice or "
+        "ElevenLabs key. Save API keys in the sidebar to switch automatically."
+    )
+elif engine in ("leopard", "cheetah"):
     st.caption(f"Using Picovoice **{engine.capitalize()}** with your AccessKey.")
+else:
+    st.caption(f"Engine: **{engine}**")
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +686,9 @@ def transcribe_once(audio: np.ndarray) -> Optional[TranscriptionResult]:
     side effects. Returns None on error (error is surfaced via st.error).
     """
     try:
-        transcriber = make_transcriber(engine, access_key, eleven_api_key)
+        transcriber = make_transcriber(
+            engine, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+        )
     except TranscriberError as exc:
         st.error(str(exc))
         return None
@@ -710,7 +764,9 @@ def run_pipeline(audio: np.ndarray, source: str) -> None:
             }
 
     try:
-        transcriber = make_transcriber(engine, access_key, eleven_api_key)
+        transcriber = make_transcriber(
+            engine, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+        )
     except TranscriberError as exc:
         st.error(str(exc))
         return
@@ -756,6 +812,8 @@ def _spinner_label_for(eng: str) -> str:
         return "Running mock transcriber…"
     if eng == "elevenlabs":
         return "Uploading to ElevenLabs Scribe…"
+    if eng == "vosk":
+        return "Transcribing with Vosk (offline)…"
     return "Transcribing with Picovoice…"
 
 
@@ -1089,6 +1147,8 @@ with tab_latency:
         available_bench_engines.extend(["leopard", "cheetah"])
     if eleven_api_key:
         available_bench_engines.append("elevenlabs")
+    if vosk_runtime_available():
+        available_bench_engines.append("vosk")
     available_bench_engines.append("mock")
 
     if last_audio is None:
@@ -1128,7 +1188,9 @@ with tab_latency:
                 # Warmup
                 for _ in range(int(warmup)):
                     try:
-                        tmp = make_transcriber(eng, access_key, eleven_api_key)
+                        tmp = make_transcriber(
+                            eng, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                        )
                         if eng == "cheetah":
                             tmp.process_stream(last_audio)
                         else:
@@ -1138,7 +1200,9 @@ with tab_latency:
                         break
 
                 res = benchmark_engine(
-                    make_transcriber_fn=lambda e=eng: make_transcriber(e, access_key, eleven_api_key),
+                    make_transcriber_fn=lambda e=eng: make_transcriber(
+                        e, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                    ),
                     audio=last_audio,
                     iterations=int(iterations),
                     audio_duration_sec=audio_duration,
@@ -1353,15 +1417,17 @@ with tab_compare:
         available_engines.extend(["leopard", "cheetah"])
     if eleven_api_key:
         available_engines.append("elevenlabs")
+    if vosk_runtime_available():
+        available_engines.append("vosk")
     available_engines.append("mock")
 
     if last_audio is None:
         st.info("Record or upload audio first.")
     elif len(available_engines) < 2:
         st.info(
-            "Only one engine is available right now (mock). Set "
-            "`PICOVOICE_ACCESS_KEY` or `ELEVENLABS_API_KEY` in `.env` to "
-            "enable cross-engine comparison."
+            "Only one engine is available right now (mock). Add API keys in the "
+            "sidebar, or install **vosk** + set `VOSK_MODEL_PATH`, to enable "
+            "cross-engine comparison."
         )
     else:
         c1, c2 = st.columns(2)
@@ -1385,7 +1451,9 @@ with tab_compare:
             results_pair = {}
             for idx, eng in enumerate((engine_a, engine_b)):
                 try:
-                    t = make_transcriber(eng, access_key, eleven_api_key)
+                    t = make_transcriber(
+                        eng, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                    )
                 except TranscriberError as exc:
                     st.error(f"{eng}: {exc}")
                     t = None

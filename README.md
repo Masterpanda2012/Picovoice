@@ -159,7 +159,7 @@ sized investment — demoted to its real value.
 ```
 Mic input  →  VAD (optional): Cobra if AccessKey, else RMS energy gate
            →  Optional offline Vosk partial hints (if VOSK_MODEL_PATH)
-           →  STT (Picovoice / ElevenLabs / mock)
+           →  STT (Picovoice / ElevenLabs / Vosk / mock)
            →  Streamlit UI (CREATE-TKS-style Heard / Partial panel when VAD on)
 ```
 
@@ -193,8 +193,13 @@ The debugger resolves its STT engine in this priority order:
    is designed around Picovoice's per-word scores.
 2. **ElevenLabs Scribe** (`ELEVENLABS_API_KEY`) — cloud fallback with
    per-word timestamps and (when the model exposes them) `logprob`-based
-   confidence. Use this if you can't obtain a Picovoice AccessKey.
-3. **Mock** — offline simulation. No network, no keys.
+   confidence.
+3. **Vosk** (`pip install vosk` + `VOSK_MODEL_PATH` to an unzipped model) —
+   **default when neither Picovoice nor ElevenLabs is configured** — fully
+   offline Kaldi STT on your machine. As soon as you save a Picovoice or
+   ElevenLabs key in the sidebar (or `.env`), the app switches to that tier.
+4. **Mock** — offline simulation only when Vosk is also unavailable (no
+   model path or missing `vosk` package).
 
 Any key you do provide enables the corresponding engine automatically:
 
@@ -202,13 +207,15 @@ Any key you do provide enables the corresponding engine automatically:
 - Only ElevenLabs set → uses Scribe.
 - Both set → Picovoice is preferred, but you can switch to ElevenLabs
   from the sidebar (useful for A/B comparison).
-- Neither set → mock mode.
+- Neither cloud key set, but Vosk is ready → **Vosk** is the default.
+- Neither cloud key nor Vosk → **mock** mode.
 
-Get keys:
+Get keys / models:
 
 - Picovoice: [console.picovoice.ai](https://console.picovoice.ai) —
   **a personal email works fine; no company email required.**
 - ElevenLabs: [elevenlabs.io → API keys](https://elevenlabs.io/app/settings/api-keys).
+- Vosk models: [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models).
 
 ### 2. Install
 
@@ -266,6 +273,8 @@ but if an older build passed them through, Picovoice would error with
 “Failed to parse AccessKey”. Delete the line or paste a real key from
 [console.picovoice.ai](https://console.picovoice.ai).
 
+### 4. Run
+
 ```bash
 streamlit run app.py
 ```
@@ -273,7 +282,15 @@ streamlit run app.py
 Streamlit opens a browser tab at `http://localhost:8501`. Click
 **🔴 Record**, speak, and watch the confidence scores land.
 
-## Fallback modes (no Picovoice AccessKey)
+## Fallback modes (no Picovoice / ElevenLabs keys)
+
+### Vosk (offline — default when configured)
+
+If **`pip install vosk`** is installed and **`VOSK_MODEL_PATH`** points at an
+unzipped model directory, the app **defaults to the `vosk` engine** (no API
+keys required). Transcription runs entirely on-device. Saving a Picovoice or
+ElevenLabs key in the sidebar (or `.env`) automatically switches the default
+radio selection to that tier.
 
 ### ElevenLabs Scribe (cloud)
 
@@ -294,8 +311,8 @@ Switch back to Picovoice by dropping a `PICOVOICE_ACCESS_KEY` into
 
 ### Mock (fully offline)
 
-If you have neither key, pick **`mock`** in the Engine selector. The
-app will:
+If you have **no** Picovoice/ElevenLabs keys **and** Vosk is not runnable (no
+model path or missing `vosk` package), only **`mock`** remains. The app will:
 
 - Record real audio from your microphone.
 - Fabricate a plausible transcript of roughly the right length.
@@ -331,7 +348,8 @@ for w in result.words:
 | Leopard     | Batch STT   | On-device | ✅ Real                        | `PICOVOICE_ACCESS_KEY` | v1 debugger (default, **preferred**)  |
 | Cheetah     | Streaming   | On-device | ⚠️ Limited (not exposed)      | `PICOVOICE_ACCESS_KEY` | Live-demo feel, latency comparisons   |
 | ElevenLabs  | Batch STT   | Cloud     | ✅ `logprob`-derived           | `ELEVENLABS_API_KEY`   | Fallback when Picovoice key unavailable |
-| mock        | Simulated   | Offline   | Synthetic (real audio-driven) | — none —               | UI exploration, offline demos         |
+| Vosk        | Batch STT   | On-device | ✅ Kaldi `conf` per word       | `VOSK_MODEL_PATH` + `vosk` pkg | **Default** when no cloud keys        |
+| mock        | Simulated   | Offline   | Synthetic (real audio-driven) | — none —               | Last resort when Vosk also unavailable |
 | Cobra (VAD) | VAD only    | On-device | n/a                           | `PICOVOICE_ACCESS_KEY` | Silence filtering                     |
 
 Leopard is the recommended engine for the debugger because it exposes

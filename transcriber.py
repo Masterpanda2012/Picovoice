@@ -1,5 +1,5 @@
-"""Thin wrappers around Picovoice Leopard (batch), Cheetah (streaming), and
-ElevenLabs Scribe (cloud).
+"""Thin wrappers around Picovoice Leopard (batch), Cheetah (streaming),
+ElevenLabs Scribe (cloud), and Vosk (offline Kaldi).
 
 We expose a uniform `TranscriptionResult` so the UI doesn't care which
 engine produced it. Each word carries a confidence score in [0, 1] which
@@ -8,16 +8,19 @@ is the whole point of the debugger.
 Engine priority (handled by the caller, not here):
     1. Picovoice (Leopard / Cheetah) — on-device, real word-level confidence
     2. ElevenLabs Scribe             — cloud fallback, per-word logprob
-    3. Mock                          — offline simulation
+    3. Vosk                          — offline on-device when model path + package present
+    4. Mock                          — offline simulation
 """
 
 from __future__ import annotations
 
+import json
 import io
 import math
 import os
 import wave
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 import numpy as np
@@ -367,6 +370,104 @@ class ElevenLabsTranscriber:
 
 
 # ---------------------------------------------------------------------------
+# Vosk (offline Kaldi) — default when no Picovoice / ElevenLabs keys
+# ---------------------------------------------------------------------------
+
+
+class VoskTranscriber:
+    """On-device batch STT via Vosk (Kaldi). Requires ``pip install vosk`` and a
+    model directory (``VOSK_MODEL_PATH``). Emits per-word timestamps and
+    confidence when the recognizer returns a ``result`` list.
+    """
+
+    def __init__(self, model_dir: str | Path):
+        path = Path(model_dir).expanduser()
+        if not path.is_dir():
+            raise TranscriberError(
+                f"Vosk model directory not found: {path}. "
+                "Set VOSK_MODEL_PATH to an unzipped model from "
+                "https://alphacephei.com/vosk/models"
+            )
+        try:
+            from vosk import Model
+
+            self._model = Model(str(path))
+        except Exception as exc:
+            raise TranscriberError(f"Failed to load Vosk model: {exc}") from exc
+
+    def transcribe(self, audio: np.ndarray) -> TranscriptionResult:
+        from vosk import KaldiRecognizer
+
+        if audio.dtype != np.int16:
+            audio = audio.astype(np.int16)
+        audio = audio.flatten()
+        if audio.size == 0:
+            return TranscriptionResult(transcript="", words=[], engine="vosk")
+
+        rec = KaldiRecognizer(self._model, int(AUDIO.sample_rate))
+        rec.SetWords(True)
+
+        step = 4000
+        for start in range(0, audio.size, step):
+            chunk = audio[start : start + step].tobytes()
+            if rec.AcceptWaveform(chunk):
+                pass
+
+        try:
+            final_j = json.loads(rec.FinalResult())
+        except Exception as exc:
+            raise TranscriberError(f"Vosk final decode failed: {exc}") from exc
+
+        transcript = str(final_j.get("text", "") or "").strip()
+        words: List[Word] = []
+        duration = audio.size / float(AUDIO.sample_rate)
+
+        for w in final_j.get("result") or []:
+            token = str(w.get("word", "") or "").strip()
+            if not token:
+                continue
+            try:
+                conf = float(w.get("conf", 1.0))
+            except (TypeError, ValueError):
+                conf = 1.0
+            conf = float(np.clip(conf, 0.0, 1.0))
+            words.append(
+                Word(
+                    word=token,
+                    confidence=conf,
+                    start_sec=float(w.get("start", 0.0)),
+                    end_sec=float(w.get("end", 0.0)),
+                )
+            )
+
+        if not words and transcript:
+            tokens = transcript.split()
+            n = len(tokens)
+            step_t = duration / max(1, n)
+            for i, tok in enumerate(tokens):
+                words.append(
+                    Word(
+                        word=tok,
+                        confidence=0.75,
+                        start_sec=round(i * step_t, 3),
+                        end_sec=round((i + 1) * step_t, 3),
+                    )
+                )
+
+        return TranscriptionResult(
+            transcript=transcript,
+            words=words,
+            engine="vosk",
+        )
+
+    def delete(self) -> None:
+        try:
+            del self._model
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Mock (offline demo, no AccessKey)
 # ---------------------------------------------------------------------------
 
@@ -480,14 +581,12 @@ def make_transcriber(
     engine: str,
     access_key: str | None,
     eleven_api_key: str | None = None,
+    vosk_model_dir: str | Path | None = None,
 ):
     """Construct a transcriber for the given engine id.
 
-    Priority, when letting this function pick automatically via `resolve_engine`:
-        Picovoice (leopard/cheetah) > ElevenLabs (elevenlabs) > Mock.
-
-    For ElevenLabs, `eleven_api_key` takes precedence; if not supplied, the
-    ELEVENLABS_API_KEY environment variable is used.
+    Priority when auto-picking via ``resolve_engine``:
+        Picovoice > ElevenLabs > Vosk (model + package) > Mock.
     """
     engine = (engine or "leopard").lower()
     if engine == "mock":
@@ -499,9 +598,16 @@ def make_transcriber(
     if engine in ("elevenlabs", "eleven", "scribe"):
         key = (eleven_api_key or os.environ.get("ELEVENLABS_API_KEY") or "").strip()
         return ElevenLabsTranscriber(api_key=key)
+    if engine in ("vosk", "vosk_stt"):
+        md = vosk_model_dir or os.environ.get("VOSK_MODEL_PATH")
+        if not md:
+            raise TranscriberError(
+                "Vosk needs VOSK_MODEL_PATH set to an unzipped model directory."
+            )
+        return VoskTranscriber(model_dir=md)
     raise TranscriberError(
         f"Unknown engine '{engine}'. "
-        "Use 'leopard', 'cheetah', 'elevenlabs', or 'mock'."
+        "Use 'leopard', 'cheetah', 'elevenlabs', 'vosk', or 'mock'."
     )
 
 
@@ -509,10 +615,13 @@ def resolve_engine(
     has_picovoice_key: bool,
     has_eleven_key: bool,
     preferred: str | None = None,
+    *,
+    has_vosk_model: bool = False,
 ) -> str:
-    """Pick an engine based on the priority Picovoice > ElevenLabs > Mock.
+    """Pick an engine: Picovoice > ElevenLabs > Vosk > Mock.
 
-    If `preferred` is set and viable given the keys, it is honoured.
+    If ``preferred`` is set and viable given keys / Vosk availability, it is
+    honoured.
     """
     if preferred:
         p = preferred.lower()
@@ -520,10 +629,14 @@ def resolve_engine(
             return p
         if p in ("elevenlabs", "eleven", "scribe") and has_eleven_key:
             return "elevenlabs"
+        if p in ("vosk", "vosk_stt") and has_vosk_model:
+            return "vosk"
         if p == "mock":
             return "mock"
     if has_picovoice_key:
         return "leopard"
     if has_eleven_key:
         return "elevenlabs"
+    if has_vosk_model:
+        return "vosk"
     return "mock"
