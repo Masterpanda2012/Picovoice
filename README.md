@@ -159,7 +159,7 @@ sized investment — demoted to its real value.
 ```
 Mic input  →  VAD (optional): Cobra if AccessKey, else RMS energy gate
            →  Optional offline Vosk partial hints (if VOSK_MODEL_PATH)
-           →  STT (Picovoice / ElevenLabs / Vosk / mock)
+           →  STT (Picovoice / ElevenLabs / Groq Whisper / Vosk / mock)
            →  Streamlit UI (CREATE-TKS-style Heard / Partial panel when VAD on)
 ```
 
@@ -169,7 +169,7 @@ Mic input  →  VAD (optional): Cobra if AccessKey, else RMS energy gate
 voice-debugger/
 ├── app.py              # Streamlit UI — 5 tabs, main entry point
 ├── recorder.py         # sounddevice mic capture + WAV loader
-├── transcriber.py      # Leopard / Cheetah / Mock wrappers
+├── transcriber.py      # Leopard / Cheetah / ElevenLabs / Groq Whisper / Vosk / Mock
 ├── vad.py              # Cobra VAD (Picovoice AccessKey)
 ├── energy_vad.py       # RMS energy gate — VAD backup without Picovoice key
 ├── vosk_hints.py       # Optional offline Vosk partials (CREATE-TKS-style)
@@ -194,27 +194,32 @@ The debugger resolves its STT engine in this priority order:
 2. **ElevenLabs Scribe** (`ELEVENLABS_API_KEY`) — cloud fallback with
    per-word timestamps and (when the model exposes them) `logprob`-based
    confidence.
-3. **Vosk** (`pip install vosk` + `VOSK_MODEL_PATH` to an unzipped model) —
-   **default when neither Picovoice nor ElevenLabs is configured** — fully
-   offline Kaldi STT on your machine. As soon as you save a Picovoice or
-   ElevenLabs key in the sidebar (or `.env`), the app switches to that tier.
-4. **Mock** — offline simulation only when Vosk is also unavailable (no
+3. **Groq Whisper** (`GROQ_API_KEY`) — hosted **Whisper** on Groq’s
+   OpenAI-compatible API (**not** xAI Grok). Optional `GROQ_WHISPER_MODEL`
+   defaults to `whisper-large-v3-turbo`.
+4. **Vosk** (`pip install vosk` + `VOSK_MODEL_PATH` to an unzipped model) —
+   **default when no Picovoice, ElevenLabs, or Groq key is configured** — fully
+   offline Kaldi STT on your machine. As soon as you save a higher-priority key
+   in the sidebar (or `.env`), the app switches to that tier.
+5. **Mock** — offline simulation only when Vosk is also unavailable (no
    model path or missing `vosk` package).
 
 Any key you do provide enables the corresponding engine automatically:
 
 - Only Picovoice set → uses Leopard (default).
 - Only ElevenLabs set → uses Scribe.
+- Only Groq set → uses **Groq Whisper** (default).
 - Both set → Picovoice is preferred, but you can switch to ElevenLabs
   from the sidebar (useful for A/B comparison).
-- Neither cloud key set, but Vosk is ready → **Vosk** is the default.
-- Neither cloud key nor Vosk → **mock** mode.
+- Neither Picovoice nor ElevenLabs nor Groq set, but Vosk is ready → **Vosk** is the default.
+- No cloud keys nor Vosk → **mock** mode.
 
 Get keys / models:
 
 - Picovoice: [console.picovoice.ai](https://console.picovoice.ai) —
   **a personal email works fine; no company email required.**
 - ElevenLabs: [elevenlabs.io → API keys](https://elevenlabs.io/app/settings/api-keys).
+- Groq: [console.groq.com](https://console.groq.com) — API key for Whisper transcription.
 - Vosk models: [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models).
 
 ### 2. Install
@@ -241,7 +246,7 @@ sudo apt-get install -y libportaudio2
 You can either:
 
 1. **Paste in the app (easiest)** — open the sidebar **API keys** section, enter
-   your Picovoice and/or ElevenLabs key, click **Save for this session**. Keys
+   your Picovoice, ElevenLabs, and/or Groq key, click **Save for this session**. Keys
    stay in the browser tab only (RAM); nothing is written to disk.
 
 2. **Use a `.env` file** (persists across restarts):
@@ -256,6 +261,7 @@ cp .env.example .env
 ```bash
 PICOVOICE_ACCESS_KEY=your-picovoice-key
 ELEVENLABS_API_KEY=your-elevenlabs-key
+GROQ_API_KEY=your-groq-key
 ```
 
 Or export them for the current shell:
@@ -263,6 +269,7 @@ Or export them for the current shell:
 ```bash
 export PICOVOICE_ACCESS_KEY="your-picovoice-key"
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
+export GROQ_API_KEY="your-groq-key"
 ```
 
 `.env` is git-ignored, so neither key will be committed.
@@ -284,13 +291,22 @@ Streamlit opens a browser tab at `http://localhost:8501`. Click
 
 ## Fallback modes (no Picovoice / ElevenLabs keys)
 
-### Vosk (offline — default when configured)
+### Vosk (offline — default when Groq is also unset)
 
 If **`pip install vosk`** is installed and **`VOSK_MODEL_PATH`** points at an
-unzipped model directory, the app **defaults to the `vosk` engine** (no API
-keys required). Transcription runs entirely on-device. Saving a Picovoice or
-ElevenLabs key in the sidebar (or `.env`) automatically switches the default
-radio selection to that tier.
+unzipped model directory, the app **defaults to the `vosk` engine** when you have
+no Picovoice, ElevenLabs, or Groq key. Transcription runs entirely on-device.
+Saving a higher-priority key in the sidebar (or `.env`) automatically switches
+the default radio selection to that tier.
+
+With **Vosk** selected, you can still paste a **Groq** key and run **Groq Whisper**
+on the same clip from the Debugger tab to compare accuracy (WER vs Vosk).
+
+### Groq Whisper (cloud)
+
+If you set **`GROQ_API_KEY`** (or paste a session key), the app exposes **`groq_whisper`**:
+Whisper on Groq’s `https://api.groq.com/openai/v1/audio/transcriptions` endpoint.
+It sits **after** ElevenLabs and **before** Vosk in the auto-priority order.
 
 ### ElevenLabs Scribe (cloud)
 
@@ -311,7 +327,7 @@ Switch back to Picovoice by dropping a `PICOVOICE_ACCESS_KEY` into
 
 ### Mock (fully offline)
 
-If you have **no** Picovoice/ElevenLabs keys **and** Vosk is not runnable (no
+If you have **no** Picovoice/ElevenLabs/**Groq** keys **and** Vosk is not runnable (no
 model path or missing `vosk` package), only **`mock`** remains. The app will:
 
 - Record real audio from your microphone.
@@ -348,7 +364,8 @@ for w in result.words:
 | Leopard     | Batch STT   | On-device | ✅ Real                        | `PICOVOICE_ACCESS_KEY` | v1 debugger (default, **preferred**)  |
 | Cheetah     | Streaming   | On-device | ⚠️ Limited (not exposed)      | `PICOVOICE_ACCESS_KEY` | Live-demo feel, latency comparisons   |
 | ElevenLabs  | Batch STT   | Cloud     | ✅ `logprob`-derived           | `ELEVENLABS_API_KEY`   | Fallback when Picovoice key unavailable |
-| Vosk        | Batch STT   | On-device | ✅ Kaldi `conf` per word       | `VOSK_MODEL_PATH` + `vosk` pkg | **Default** when no cloud keys        |
+| Groq Whisper | Batch STT  | Cloud     | ✅ Whisper `probability` when present | `GROQ_API_KEY` (+ optional `GROQ_WHISPER_MODEL`) | Cloud accuracy; reference vs Vosk |
+| Vosk        | Batch STT   | On-device | ✅ Kaldi `conf` per word       | `VOSK_MODEL_PATH` + `vosk` pkg | **Default** when no Picovoice / ElevenLabs / Groq |
 | mock        | Simulated   | Offline   | Synthetic (real audio-driven) | — none —               | Last resort when Vosk also unavailable |
 | Cobra (VAD) | VAD only    | On-device | n/a                           | `PICOVOICE_ACCESS_KEY` | Silence filtering                     |
 

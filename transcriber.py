@@ -1,5 +1,5 @@
 """Thin wrappers around Picovoice Leopard (batch), Cheetah (streaming),
-ElevenLabs Scribe (cloud), and Vosk (offline Kaldi).
+ElevenLabs Scribe (cloud), Groq-hosted Whisper (cloud), and Vosk (offline Kaldi).
 
 We expose a uniform `TranscriptionResult` so the UI doesn't care which
 engine produced it. Each word carries a confidence score in [0, 1] which
@@ -8,8 +8,9 @@ is the whole point of the debugger.
 Engine priority (handled by the caller, not here):
     1. Picovoice (Leopard / Cheetah) — on-device, real word-level confidence
     2. ElevenLabs Scribe             — cloud fallback, per-word logprob
-    3. Vosk                          — offline on-device when model path + package present
-    4. Mock                          — offline simulation
+    3. Groq Whisper                  — cloud Whisper on Groq (OpenAI-compatible API)
+    4. Vosk                          — offline on-device when model path + package present
+    5. Mock                          — offline simulation
 """
 
 from __future__ import annotations
@@ -370,6 +371,170 @@ class ElevenLabsTranscriber:
 
 
 # ---------------------------------------------------------------------------
+# Groq Whisper (cloud) — OpenAI-compatible hosted Whisper on Groq
+# ---------------------------------------------------------------------------
+
+
+class GroqWhisperTranscriber:
+    """Batch STT via Groq's OpenAI-compatible ``/audio/transcriptions`` endpoint.
+
+    Uses ``response_format=verbose_json`` and word-level timestamps when the
+    API returns them. This is **Groq** (groq.com), not xAI Grok.
+    """
+
+    _ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
+    _DEFAULT_MODEL = "whisper-large-v3-turbo"
+    _REQUEST_TIMEOUT_SEC = 120.0
+
+    def __init__(
+        self,
+        api_key: str,
+        model_id: Optional[str] = None,
+        language_code: Optional[str] = None,
+    ):
+        if not api_key:
+            raise TranscriberError(
+                "Missing Groq API key. Set GROQ_API_KEY or paste a session key."
+            )
+        try:
+            import requests  # noqa: F401
+        except Exception as exc:
+            raise TranscriberError(
+                "`requests` is required for the Groq Whisper engine. "
+                "Run `pip install requests`."
+            ) from exc
+        self._api_key = api_key.strip()
+        self._model_id = (
+            model_id or os.environ.get("GROQ_WHISPER_MODEL") or self._DEFAULT_MODEL
+        ).strip()
+        lc = language_code if language_code is not None else os.environ.get(
+            "GROQ_WHISPER_LANGUAGE"
+        )
+        self._language = (lc or "").strip() or None
+
+    @staticmethod
+    def _encode_wav(audio: np.ndarray) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(AUDIO.channels)
+            wf.setsampwidth(2)
+            wf.setframerate(AUDIO.sample_rate)
+            wf.writeframes(audio.tobytes())
+        return buf.getvalue()
+
+    @staticmethod
+    def _collect_word_dicts(payload: dict) -> List[dict]:
+        words = payload.get("words")
+        if isinstance(words, list) and words:
+            return list(words)
+        out: List[dict] = []
+        for seg in payload.get("segments") or []:
+            for w in seg.get("words") or []:
+                out.append(w)
+        return out
+
+    @staticmethod
+    def _word_confidence(w: dict) -> float:
+        p = w.get("probability")
+        if p is None:
+            return 1.0
+        try:
+            v = float(p)
+        except Exception:
+            return 1.0
+        if not math.isfinite(v):
+            return 1.0
+        return float(max(0.0, min(1.0, v)))
+
+    def transcribe(self, audio: np.ndarray) -> TranscriptionResult:
+        import requests
+
+        if audio.dtype != np.int16:
+            audio = audio.astype(np.int16)
+        audio = audio.flatten()
+        if audio.size == 0:
+            return TranscriptionResult("", [], engine="groq_whisper")
+
+        wav_bytes = self._encode_wav(audio)
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+        data: List[tuple[str, str]] = [
+            ("model", self._model_id),
+            ("response_format", "verbose_json"),
+            ("temperature", "0"),
+            ("timestamp_granularities[]", "word"),
+        ]
+        if self._language:
+            data.append(("language", self._language.strip()))
+
+        try:
+            resp = requests.post(
+                self._ENDPOINT,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=self._REQUEST_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            raise TranscriberError(
+                f"Groq Whisper request failed (network error): {exc}"
+            ) from exc
+
+        if resp.status_code == 401:
+            raise TranscriberError(
+                "Groq rejected the API key (401). Check GROQ_API_KEY."
+            )
+        if resp.status_code == 429:
+            raise TranscriberError(
+                "Groq rate-limited this request (429). Slow down or retry later."
+            )
+        if resp.status_code >= 400:
+            try:
+                err = resp.json()
+            except Exception:
+                err = (resp.text or "")[:400]
+            raise TranscriberError(f"Groq API error {resp.status_code}: {err}")
+
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise TranscriberError(f"Groq returned non-JSON: {exc}") from exc
+
+        transcript = (payload.get("text") or "").strip()
+        raw_words = self._collect_word_dicts(payload)
+        words: List[Word] = []
+        for w in raw_words:
+            token = (w.get("word") or "").strip()
+            if not token:
+                continue
+            try:
+                start = float(w.get("start", 0.0))
+            except Exception:
+                start = 0.0
+            try:
+                end = float(w.get("end", start))
+            except Exception:
+                end = start
+            words.append(
+                Word(
+                    word=token,
+                    confidence=self._word_confidence(w),
+                    start_sec=start,
+                    end_sec=end,
+                )
+            )
+
+        return TranscriptionResult(
+            transcript=transcript,
+            words=words,
+            engine="groq_whisper",
+        )
+
+    def delete(self) -> None:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Vosk (offline Kaldi) — default when no Picovoice / ElevenLabs keys
 # ---------------------------------------------------------------------------
 
@@ -582,11 +747,12 @@ def make_transcriber(
     access_key: str | None,
     eleven_api_key: str | None = None,
     vosk_model_dir: str | Path | None = None,
+    groq_api_key: str | None = None,
 ):
     """Construct a transcriber for the given engine id.
 
     Priority when auto-picking via ``resolve_engine``:
-        Picovoice > ElevenLabs > Vosk (model + package) > Mock.
+        Picovoice > ElevenLabs > Groq Whisper > Vosk (model + package) > Mock.
     """
     engine = (engine or "leopard").lower()
     if engine == "mock":
@@ -598,6 +764,9 @@ def make_transcriber(
     if engine in ("elevenlabs", "eleven", "scribe"):
         key = (eleven_api_key or os.environ.get("ELEVENLABS_API_KEY") or "").strip()
         return ElevenLabsTranscriber(api_key=key)
+    if engine in ("groq_whisper", "groq", "whisper_groq"):
+        key = (groq_api_key or os.environ.get("GROQ_API_KEY") or "").strip()
+        return GroqWhisperTranscriber(api_key=key)
     if engine in ("vosk", "vosk_stt"):
         md = vosk_model_dir or os.environ.get("VOSK_MODEL_PATH")
         if not md:
@@ -607,7 +776,7 @@ def make_transcriber(
         return VoskTranscriber(model_dir=md)
     raise TranscriberError(
         f"Unknown engine '{engine}'. "
-        "Use 'leopard', 'cheetah', 'elevenlabs', 'vosk', or 'mock'."
+        "Use 'leopard', 'cheetah', 'elevenlabs', 'groq_whisper', 'vosk', or 'mock'."
     )
 
 
@@ -616,9 +785,10 @@ def resolve_engine(
     has_eleven_key: bool,
     preferred: str | None = None,
     *,
+    has_groq_key: bool = False,
     has_vosk_model: bool = False,
 ) -> str:
-    """Pick an engine: Picovoice > ElevenLabs > Vosk > Mock.
+    """Pick an engine: Picovoice > ElevenLabs > Groq Whisper > Vosk > Mock.
 
     If ``preferred`` is set and viable given keys / Vosk availability, it is
     honoured.
@@ -629,6 +799,8 @@ def resolve_engine(
             return p
         if p in ("elevenlabs", "eleven", "scribe") and has_eleven_key:
             return "elevenlabs"
+        if p in ("groq_whisper", "groq", "whisper_groq") and has_groq_key:
+            return "groq_whisper"
         if p in ("vosk", "vosk_stt") and has_vosk_model:
             return "vosk"
         if p == "mock":
@@ -637,6 +809,8 @@ def resolve_engine(
         return "leopard"
     if has_eleven_key:
         return "elevenlabs"
+    if has_groq_key:
+        return "groq_whisper"
     if has_vosk_model:
         return "vosk"
     return "mock"

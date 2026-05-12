@@ -23,8 +23,10 @@ from config import (
     CONFIDENCE,
     get_access_key,
     get_elevenlabs_api_key,
+    get_groq_api_key,
     get_vosk_model_path,
     normalize_session_elevenlabs_key,
+    normalize_session_groq_key,
     normalize_session_picovoice_key,
 )
 from recorder import (
@@ -151,6 +153,10 @@ if "user_pico_key" not in st.session_state:
     st.session_state.user_pico_key = ""
 if "user_eleven_key" not in st.session_state:
     st.session_state.user_eleven_key = ""
+if "user_groq_key" not in st.session_state:
+    st.session_state.user_groq_key = ""
+if "groq_reference_result" not in st.session_state:
+    st.session_state.groq_reference_result = None
 if "debugger_engine" not in st.session_state:
     st.session_state.debugger_engine = "mock"
 if "_engine_sig" not in st.session_state:
@@ -173,14 +179,32 @@ def resolved_elevenlabs_key() -> str:
     return get_elevenlabs_api_key() or ""
 
 
+def resolved_groq_key() -> str:
+    """Session-pasted Groq API key wins over ``GROQ_API_KEY`` from env."""
+    u = normalize_session_groq_key(st.session_state.get("user_groq_key"))
+    if u:
+        return u
+    return get_groq_api_key() or ""
+
+
 _rp = resolved_picovoice_key()
 _re = resolved_elevenlabs_key()
+_rg = resolved_groq_key().strip()
 if not _rp and not _re:
-    if vosk_runtime_available():
+    if _rg:
+        st.info(
+            "**Groq Whisper** — you have a **Groq API key** (session or `.env`). "
+            "Default STT is **Whisper** on Groq’s OpenAI-compatible API "
+            "(**not** xAI Grok). Add Picovoice or ElevenLabs under **sidebar → API keys** "
+            "anytime for on-device engines. Priority: "
+            "**Picovoice → ElevenLabs → Groq Whisper → Vosk → Mock**."
+        )
+    elif vosk_runtime_available():
         st.info(
             "**No Picovoice or ElevenLabs key** — default STT is **Vosk** (offline, "
             "on-device). Add keys under **sidebar → API keys** anytime; the "
             "engine switches to Picovoice or ElevenLabs as soon as they are saved. "
+            "Optional **Groq** key runs **Whisper** in the cloud for higher accuracy. "
             "Models: [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)."
         )
     else:
@@ -188,7 +212,7 @@ if not _rp and not _re:
             "**First time here?** With no cloud keys, install **`pip install vosk`**, "
             "set **`VOSK_MODEL_PATH`** to an unzipped model folder, then restart — "
             "the app will default to **Vosk** offline STT. Or open **sidebar → API keys** "
-            "and paste **Picovoice** / **ElevenLabs** keys. "
+            "and paste **Picovoice** / **ElevenLabs** / **Groq** keys. "
             "Free Picovoice key: [console.picovoice.ai](https://console.picovoice.ai)."
         )
 
@@ -246,11 +270,14 @@ def build_session_report() -> str:
     lines.append(f"- Warning threshold: {st.session_state.get('threshold_value', 0.75):.2f}")
     has_key_now = bool(st.session_state.get('has_key_flag'))
     has_eleven_now = bool(st.session_state.get('has_eleven_flag'))
+    has_groq_now = bool(st.session_state.get('has_groq_flag'))
     has_vosk_now = bool(st.session_state.get('has_vosk_flag'))
     if has_key_now:
         key_state = "Picovoice (on-device)"
     elif has_eleven_now:
         key_state = "ElevenLabs Scribe (cloud fallback)"
+    elif has_groq_now:
+        key_state = "Groq Whisper (cloud)"
     elif has_vosk_now:
         key_state = "Vosk (offline STT)"
     else:
@@ -400,6 +427,16 @@ with st.sidebar:
             placeholder="Optional — Scribe cloud STT …",
             help="Leave blank when saving to keep the previous session ElevenLabs key unchanged.",
         )
+        groq_in = st.text_input(
+            "Groq API key (for Whisper STT)",
+            type="password",
+            placeholder="From console.groq.com — not xAI Grok …",
+            help=(
+                "Must be a **Groq** API key (groq.com → console), used for hosted **Whisper** "
+                "speech-to-text. An **xAI Grok** API key is a different product and **will not work** "
+                "here. Leave blank when saving to keep the previous session Groq key unchanged."
+            ),
+        )
         c_save, c_clear = st.columns(2)
         with c_save:
             save_keys = st.form_submit_button("Save for this session", type="primary")
@@ -422,6 +459,13 @@ with st.sidebar:
                 parts.append("ElevenLabs saved")
             else:
                 parts.append("ElevenLabs: ignored (placeholder?)")
+        if groq_in.strip():
+            ng_k = normalize_session_groq_key(groq_in)
+            if ng_k:
+                st.session_state.user_groq_key = ng_k
+                parts.append("Groq saved")
+            else:
+                parts.append("Groq: ignored (placeholder?)")
         st.session_state._api_key_toast = (
             " · ".join(parts)
             if parts
@@ -432,35 +476,44 @@ with st.sidebar:
     if clear_keys:
         st.session_state.user_pico_key = ""
         st.session_state.user_eleven_key = ""
+        st.session_state.user_groq_key = ""
         st.session_state._api_key_toast = "Session keys cleared."
         st.rerun()
 
     access_key_env = get_access_key()
     eleven_key_env = get_elevenlabs_api_key()
+    groq_key_env = get_groq_api_key()
     access_key = resolved_picovoice_key().strip()
     eleven_api_key = resolved_elevenlabs_key().strip()
+    groq_api_key = resolved_groq_key().strip()
 
     sp_sess = bool(normalize_session_picovoice_key(st.session_state.get("user_pico_key")))
     se_sess = bool(normalize_session_elevenlabs_key(st.session_state.get("user_eleven_key")))
+    sg_sess = bool(normalize_session_groq_key(st.session_state.get("user_groq_key")))
 
     st.caption(
         f"**Active** · Picovoice: {'yes' if access_key else 'no'} · "
-        f"ElevenLabs: {'yes' if eleven_api_key else 'no'}  \n"
+        f"ElevenLabs: {'yes' if eleven_api_key else 'no'} · "
+        f"Groq: {'yes' if groq_api_key else 'no'}  \n"
         f"**Source** · Picovoice: "
         f"{'session' if sp_sess else ('.env' if access_key_env else '—')} · "
         f"ElevenLabs: "
-        f"{'session' if se_sess else ('.env' if eleven_key_env else '—')}"
+        f"{'session' if se_sess else ('.env' if eleven_key_env else '—')} · "
+        f"Groq: "
+        f"{'session' if sg_sess else ('.env' if groq_key_env else '—')}"
     )
 
     has_pico_env = bool(access_key_env)
     has_eleven_env = bool(eleven_key_env)
     has_key = bool(access_key)
     has_eleven = bool(eleven_api_key)
+    has_groq = bool(groq_api_key)
+    has_vosk = vosk_runtime_available()
 
     if has_key and has_eleven:
         st.success(
             "✅ Picovoice **and** ElevenLabs are ready.\n\n"
-            "Priority: **Picovoice → ElevenLabs → Vosk → Mock**."
+            "Priority: **Picovoice → ElevenLabs → Groq Whisper → Vosk → Mock**."
         )
     elif has_key:
         st.success(
@@ -473,40 +526,55 @@ with st.sidebar:
             f"({'session' if se_sess else 'from .env'}). "
             "Add Picovoice above for on-device engines."
         )
+    elif has_groq:
+        if has_vosk:
+            st.info(
+                "🟠 **Groq Whisper** (cloud) is your default STT — **Vosk** is also "
+                "available for fully offline runs. Pick **vosk** under Engine when you "
+                "need zero cloud upload."
+            )
+        else:
+            st.info(
+                "🟠 **Groq Whisper** — Whisper on Groq’s API (not xAI Grok). "
+                "Default engine is **groq_whisper**; add Picovoice/ElevenLabs or "
+                "Vosk + `VOSK_MODEL_PATH` for other options."
+            )
     elif has_vosk:
         st.info(
-            "🎤 **Vosk offline STT** — no Picovoice/ElevenLabs keys, but your "
+            "🎤 **Vosk offline STT** — no Picovoice/ElevenLabs/Groq keys, but your "
             "`VOSK_MODEL_PATH` and `vosk` install are valid. Default engine is **vosk**; "
-            "save API keys above to switch to Picovoice or ElevenLabs automatically."
+            "save API keys above to switch automatically."
         )
     else:
         st.info(
             "🎭 **Mock mode** — add API keys above, or install **vosk** + set "
             "`VOSK_MODEL_PATH` for offline speech. "
-            "Priority: **Picovoice → ElevenLabs → Vosk → Mock**."
+            "Priority: **Picovoice → ElevenLabs → Groq Whisper → Vosk → Mock**."
         )
 
-    has_vosk = vosk_runtime_available()
-
-    # Build engine options in priority order: Picovoice -> ElevenLabs -> Vosk -> Mock.
+    # Build engine options in priority order: Picovoice -> ElevenLabs -> Groq -> Vosk -> Mock.
     engine_options: list[str] = []
     if has_key:
         engine_options.extend(["leopard", "cheetah"])
     if has_eleven:
         engine_options.append("elevenlabs")
+    if has_groq:
+        engine_options.append("groq_whisper")
     if has_vosk:
         engine_options.append("vosk")
     engine_options.append("mock")
 
     # When API credentials change, auto-select the highest-priority engine so
     # adding a key immediately switches off Vosk without a manual radio click.
-    sig = (bool(has_key), bool(has_eleven), bool(has_vosk))
+    sig = (bool(has_key), bool(has_eleven), bool(has_groq), bool(has_vosk))
     if st.session_state.get("_engine_sig") != sig:
         st.session_state._engine_sig = sig
         if has_key:
             st.session_state.debugger_engine = "leopard"
         elif has_eleven:
             st.session_state.debugger_engine = "elevenlabs"
+        elif has_groq:
+            st.session_state.debugger_engine = "groq_whisper"
         elif has_vosk:
             st.session_state.debugger_engine = "vosk"
         else:
@@ -515,16 +583,28 @@ with st.sidebar:
     if st.session_state.debugger_engine not in engine_options:
         st.session_state.debugger_engine = engine_options[0]
 
+    def _engine_radio_label(eid: str) -> str:
+        return {
+            "leopard": "leopard (Picovoice batch)",
+            "cheetah": "cheetah (Picovoice stream)",
+            "elevenlabs": "elevenlabs (Scribe cloud)",
+            "groq_whisper": "groq_whisper (Groq Whisper cloud)",
+            "vosk": "vosk (offline Kaldi)",
+            "mock": "mock",
+        }.get(eid, eid)
+
     engine = st.radio(
         "Engine",
         options=engine_options,
         index=engine_options.index(st.session_state.debugger_engine),
         horizontal=True,
         key="debugger_engine",
+        format_func=_engine_radio_label,
         help=(
             "leopard = Picovoice batch STT with real word-level confidence. "
             "cheetah = Picovoice streaming STT (on-device). "
             "elevenlabs = ElevenLabs Scribe (cloud). "
+            "groq_whisper = Whisper on Groq’s API (cloud; not xAI Grok). "
             "vosk = offline Kaldi (default when no API keys if model path + vosk installed). "
             "mock = simulated transcript."
         ),
@@ -548,6 +628,7 @@ with st.sidebar:
     st.session_state.threshold_value = threshold
     st.session_state.has_key_flag = has_key
     st.session_state.has_eleven_flag = has_eleven
+    st.session_state.has_groq_flag = has_groq
     st.session_state.has_vosk_flag = has_vosk
 
     use_vad = st.toggle(
@@ -631,6 +712,8 @@ def _engine_has_credentials(eng: str) -> bool:
         return bool(access_key)
     if eng == "elevenlabs":
         return bool(eleven_api_key)
+    if eng in ("groq_whisper", "groq", "whisper_groq"):
+        return bool(groq_api_key)
     if eng == "vosk":
         return bool(vosk_runtime_available())
     return False
@@ -656,17 +739,24 @@ if engine == "mock":
     st.caption(
         "Mock mode — simulated transcript with audio-driven confidence. "
         "Add API keys in the sidebar, or install **vosk** + `VOSK_MODEL_PATH` for "
-        "offline speech (priority: Picovoice → ElevenLabs → Vosk → Mock)."
+        "offline speech (priority: Picovoice → ElevenLabs → Groq Whisper → Vosk → Mock)."
     )
 elif engine == "elevenlabs":
     st.caption(
         "Using **ElevenLabs Scribe** (cloud STT) — audio is uploaded to "
         "ElevenLabs. Add a Picovoice AccessKey in the sidebar for on-device engines."
     )
+elif engine == "groq_whisper":
+    st.caption(
+        "Using **Groq Whisper** — audio is sent to **api.groq.com** (Whisper; "
+        "**not** xAI Grok). Model defaults to `whisper-large-v3-turbo` "
+        "(override with `GROQ_WHISPER_MODEL` in `.env`)."
+    )
 elif engine == "vosk":
     st.caption(
         "Using **Vosk** (offline Kaldi) — runs locally with no Picovoice or "
-        "ElevenLabs key. Save API keys in the sidebar to switch automatically."
+        "ElevenLabs key. Paste a **Groq** API key in the sidebar to run **Whisper** "
+        "as a cloud reference against Vosk on the Debugger tab."
     )
 elif engine in ("leopard", "cheetah"):
     st.caption(f"Using Picovoice **{engine.capitalize()}** with your AccessKey.")
@@ -687,7 +777,11 @@ def transcribe_once(audio: np.ndarray) -> Optional[TranscriptionResult]:
     """
     try:
         transcriber = make_transcriber(
-            engine, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+            engine,
+            access_key,
+            eleven_api_key,
+            vosk_model_dir=get_vosk_model_path(),
+            groq_api_key=groq_api_key,
         )
     except TranscriberError as exc:
         st.error(str(exc))
@@ -765,7 +859,11 @@ def run_pipeline(audio: np.ndarray, source: str) -> None:
 
     try:
         transcriber = make_transcriber(
-            engine, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+            engine,
+            access_key,
+            eleven_api_key,
+            vosk_model_dir=get_vosk_model_path(),
+            groq_api_key=groq_api_key,
         )
     except TranscriberError as exc:
         st.error(str(exc))
@@ -790,6 +888,7 @@ def run_pipeline(audio: np.ndarray, source: str) -> None:
     st.session_state.last_audio = raw_audio
     st.session_state.noise_lab_results = []  # stale once audio changes
     st.session_state.compare_results = None  # ditto
+    st.session_state.groq_reference_result = None
     st.session_state.session_log.append(
         {
             "source": source,
@@ -812,6 +911,8 @@ def _spinner_label_for(eng: str) -> str:
         return "Running mock transcriber…"
     if eng == "elevenlabs":
         return "Uploading to ElevenLabs Scribe…"
+    if eng in ("groq_whisper", "groq", "whisper_groq"):
+        return "Uploading to Groq Whisper…"
     if eng == "vosk":
         return "Transcribing with Vosk (offline)…"
     return "Transcribing with Picovoice…"
@@ -994,6 +1095,59 @@ with tab_debug:
                 f"{_vlabel} kept {meta['voiced_ratio'] * 100:.1f}% of frames as voiced."
             )
 
+        # --- Groq Whisper reference (same clip as Vosk) -------------------
+        if (
+            last_audio is not None
+            and groq_api_key
+            and (meta.get("engine") == "vosk" or result.engine == "vosk")
+        ):
+            with st.expander("Groq Whisper reference (same clip)", expanded=False):
+                st.caption(
+                    "**Groq** hosts **Whisper** via an OpenAI-compatible API — "
+                    "not xAI Grok. Sends this WAV to **api.groq.com** for a "
+                    "higher-accuracy pass you can compare to **Vosk**."
+                )
+                if st.button("Run Groq Whisper on this recording", key="groq_ref_btn"):
+                    gt = None
+                    try:
+                        gt = make_transcriber(
+                            "groq_whisper",
+                            access_key,
+                            eleven_api_key,
+                            vosk_model_dir=get_vosk_model_path(),
+                            groq_api_key=groq_api_key,
+                        )
+                    except TranscriberError as exc:
+                        st.error(str(exc))
+                    if gt is not None:
+                        try:
+                            with st.spinner("Calling Groq Whisper…"):
+                                gres = gt.transcribe(last_audio)
+                        except TranscriberError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.session_state.groq_reference_result = gres
+                        finally:
+                            gt.delete()
+
+                gref = st.session_state.get("groq_reference_result")
+                if isinstance(gref, TranscriptionResult):
+                    st.markdown("**Groq transcript**")
+                    disp = (gref.transcript or "").strip() or "(empty)"
+                    st.markdown(
+                        f"<div class='va-transcript'>{html.escape(disp)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    vr = (result.transcript or "").strip()
+                    gr = (gref.transcript or "").strip()
+                    if vr or gr:
+                        wer = word_error_rate(gr, vr)
+                        st.caption(
+                            f"WER (Groq = reference, Vosk = hypothesis): "
+                            f"**{wer.wer * 100:.1f}%** · {wer.substitutions} subs · "
+                            f"{wer.deletions} dels · {wer.insertions} ins"
+                        )
+
         # --- Waveform with confidence heatmap ----------------------------
         if last_audio is not None and result.words and any(
             w.end_sec > w.start_sec for w in result.words
@@ -1147,6 +1301,8 @@ with tab_latency:
         available_bench_engines.extend(["leopard", "cheetah"])
     if eleven_api_key:
         available_bench_engines.append("elevenlabs")
+    if groq_api_key:
+        available_bench_engines.append("groq_whisper")
     if vosk_runtime_available():
         available_bench_engines.append("vosk")
     available_bench_engines.append("mock")
@@ -1189,7 +1345,11 @@ with tab_latency:
                 for _ in range(int(warmup)):
                     try:
                         tmp = make_transcriber(
-                            eng, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                            eng,
+                            access_key,
+                            eleven_api_key,
+                            vosk_model_dir=get_vosk_model_path(),
+                            groq_api_key=groq_api_key,
                         )
                         if eng == "cheetah":
                             tmp.process_stream(last_audio)
@@ -1201,7 +1361,11 @@ with tab_latency:
 
                 res = benchmark_engine(
                     make_transcriber_fn=lambda e=eng: make_transcriber(
-                        e, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                        e,
+                        access_key,
+                        eleven_api_key,
+                        vosk_model_dir=get_vosk_model_path(),
+                        groq_api_key=groq_api_key,
                     ),
                     audio=last_audio,
                     iterations=int(iterations),
@@ -1417,6 +1581,8 @@ with tab_compare:
         available_engines.extend(["leopard", "cheetah"])
     if eleven_api_key:
         available_engines.append("elevenlabs")
+    if groq_api_key:
+        available_engines.append("groq_whisper")
     if vosk_runtime_available():
         available_engines.append("vosk")
     available_engines.append("mock")
@@ -1426,8 +1592,8 @@ with tab_compare:
     elif len(available_engines) < 2:
         st.info(
             "Only one engine is available right now (mock). Add API keys in the "
-            "sidebar, or install **vosk** + set `VOSK_MODEL_PATH`, to enable "
-            "cross-engine comparison."
+            "sidebar, or install **vosk** + set `VOSK_MODEL_PATH`, or add a **Groq** "
+            "key for Whisper, to enable cross-engine comparison."
         )
     else:
         c1, c2 = st.columns(2)
@@ -1452,7 +1618,11 @@ with tab_compare:
             for idx, eng in enumerate((engine_a, engine_b)):
                 try:
                     t = make_transcriber(
-                        eng, access_key, eleven_api_key, vosk_model_dir=get_vosk_model_path()
+                        eng,
+                        access_key,
+                        eleven_api_key,
+                        vosk_model_dir=get_vosk_model_path(),
+                        groq_api_key=groq_api_key,
                     )
                 except TranscriberError as exc:
                     st.error(f"{eng}: {exc}")

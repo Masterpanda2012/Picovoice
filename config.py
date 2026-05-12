@@ -63,6 +63,11 @@ def _is_elevenlabs_placeholder(key: str) -> bool:
     return not k or k == "your-elevenlabs-api-key-here" or k.startswith("your-elevenlabs")
 
 
+def _is_groq_placeholder(key: str) -> bool:
+    k = (key or "").strip().lower()
+    return not k or k == "your-groq-api-key-here" or k.startswith("your-groq")
+
+
 def normalize_session_picovoice_key(raw: str | None) -> str | None:
     """Validate a user-pasted Picovoice key (session UI). None if empty/placeholder."""
     if raw is None:
@@ -79,6 +84,16 @@ def normalize_session_elevenlabs_key(raw: str | None) -> str | None:
         return None
     s = raw.strip()
     if _is_elevenlabs_placeholder(s):
+        return None
+    return s
+
+
+def normalize_session_groq_key(raw: str | None) -> str | None:
+    """Validate a user-pasted Groq API key (session UI). None if empty/placeholder."""
+    if raw is None:
+        return None
+    s = raw.strip()
+    if _is_groq_placeholder(s):
         return None
     return s
 
@@ -109,6 +124,17 @@ def get_elevenlabs_api_key() -> str | None:
         return None
     key = key.strip()
     if _is_elevenlabs_placeholder(key):
+        return None
+    return key
+
+
+def get_groq_api_key() -> str | None:
+    """Return the Groq API key from env (Whisper via Groq OpenAI-compatible API)."""
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        return None
+    key = key.strip()
+    if _is_groq_placeholder(key):
         return None
     return key
 
