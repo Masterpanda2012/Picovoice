@@ -54,11 +54,23 @@ CONFIDENCE = ConfidenceConfig()
 
 
 def get_access_key() -> str | None:
-    """Return the Picovoice AccessKey from env, or None if not configured."""
+    """Return the Picovoice AccessKey from env, or None if not configured.
+
+    Treats the `.env.example` placeholder as "unset" so Picovoice SDKs are
+    never fed a fake key (which produces opaque init errors).
+    """
     key = os.environ.get("PICOVOICE_ACCESS_KEY")
-    if key:
-        return key.strip()
-    return None
+    if not key:
+        return None
+    key = key.strip()
+    if not key:
+        return None
+    lowered = key.lower()
+    if lowered == "your-picovoice-access-key-here":
+        return None
+    if lowered.startswith("your-picovoice"):
+        return None
+    return key
 
 
 def get_elevenlabs_api_key() -> str | None:

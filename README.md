@@ -252,7 +252,11 @@ export ELEVENLABS_API_KEY="your-elevenlabs-key"
 
 `.env` is git-ignored, so neither key will be committed.
 
-### 4. Run
+**Do not leave the literal placeholder** `your-picovoice-access-key-here` (or
+`your-elevenlabs-api-key-here`) in `.env` — the app now ignores those strings,
+but if an older build passed them through, Picovoice would error with
+“Failed to parse AccessKey”. Delete the line or paste a real key from
+[console.picovoice.ai](https://console.picovoice.ai).
 
 ```bash
 streamlit run app.py
